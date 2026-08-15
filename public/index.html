@@ -613,6 +613,10 @@ async function speak(text) {
   // единая точка для приветствия, обычных ответов и текста при ошибке.
   pauseListening();
 
+  // Если звонок уже завершили до того, как мы вообще начали (например,
+  // повесили трубку прямо во время «думает…») — говорить нечего и некому.
+  if (!callActive) return;
+
   setTalking(true);
   setCaption(text);
   setStatus('говорит…');
@@ -630,7 +634,14 @@ async function speak(text) {
       throw new Error(data.error || `TTS ${response.status}`);
     }
 
-    const url = URL.createObjectURL(await response.blob());
+    const blob = await response.blob();
+    // Синтез длинного ответа (например, целой истории) занимает секунды —
+    // трубку могли повесить, пока мы ждали этот fetch. currentAudio в тот
+    // момент ещё не существовал, endCall() остановить было нечего — без
+    // этой проверки персонаж начинал говорить уже ПОСЛЕ завершения звонка.
+    if (!callActive) { setTalking(false); return; }
+
+    const url = URL.createObjectURL(blob);
     // ВАЖНО: раньше провал currentAudio.play() (например, браузер заблокировал
     // автовоспроизведение на телефоне) тихо «резолвил» промис как будто всё
     // прошло нормально — ни звука, ни ошибки, ни голоса браузера взамен.
