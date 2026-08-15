@@ -1,0 +1,44 @@
+# Инструкция для Render: как поднять «Звонок другу» в интернете.
+# Render прочитает этот файл сам, руками в веб-панели настраивать ничего не надо.
+#
+# Ключи СЮДА НЕ ВПИСЫВАЙ. Они помечены sync: false — это значит, что Render
+# спросит их один раз при создании сервиса и сохранит у себя в зашифрованном
+# виде. В репозиторий они не попадут.
+services:
+  - type: web
+    name: zvonok-drugu
+    runtime: node
+    plan: free
+    # Зависимостей у проекта нет, ставить нечего — но команду Render требует.
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      # Голос персонажей.
+      - key: FISH_API_KEY
+        sync: false
+      - key: FISH_MODEL
+        value: s2.1-pro-free
+
+      # «Мозги» разговора. Groq — бесплатный и самый быстрый, ему приоритет.
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+
+      # Запасной вариант, если Groq не ответит.
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: NVIDIA_MODEL
+        value: meta/llama-3.3-70b-instruct
+
+      # Потолок расходов на публичном сайте: сколько запросов пропускать
+      # с одного IP за окно и сколько всего за сутки. Подробности — в server.js.
+      - key: RATE_LIMIT_PER_IP
+        value: "120"
+      - key: RATE_LIMIT_DAILY
+        value: "3000"
+
+      # Метка «мы в облаке»: сервер не станет поднимать локальный HTTPS.
+      - key: RENDER
+        value: "true"

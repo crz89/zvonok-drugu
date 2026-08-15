@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#101014">
+<!-- Полноэкранный режим без адресной строки, когда добавлено на домашний экран телефона -->
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Звонок другу">
+<meta name="format-detection" content="telephone=no">
+<title>Звонок другу</title>
+
+<!-- Иконка приложения — та же картинка с телефонной трубкой везде:
+     вкладка браузера, домашний экран iPhone/Android, список приложений PWA -->
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180.png">
+<link rel="manifest" href="/manifest.json">
+<style>
+  :root {
+    --accent: #d32020;
+    --accent2: #8d1414;
+    --bg: #101014;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background:
+      radial-gradient(120% 80% at 50% 0%, #2a2a33 0%, var(--bg) 60%),
+      var(--bg);
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  .screen {
+    width: 100%;
+    max-width: 460px;
+    height: 100dvh;
+    max-height: 940px;
+    /* env(safe-area-inset-*) — отступы под чёлку сверху и полоску жестов
+       снизу на iPhone; на телефонах без выемки эти функции просто вернут 0. */
+    padding: calc(6vh + env(safe-area-inset-top)) 24px calc(6vh + env(safe-area-inset-bottom));
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+  .screen.active { display: flex; }
+
+  /* Компактные телефоны (SE и подобные) — сжимаем воздух сверху, чтобы
+     аватар и кнопки не улетали за нижний край экрана. */
+  @media (max-height: 700px) {
+    .screen { padding-top: calc(3vh + env(safe-area-inset-top)); }
+    .avatar { width: 132px; height: 132px; }
+    .caller { margin: 18px 0 4px; font-size: 28px; }
+  }
+
+  /* ------------------------------------------------------ экран контактов */
+  .contacts-title {
+    font-size: 26px;
+    font-weight: 700;
+    margin: 4px 0 4px;
+    align-self: flex-start;
+  }
+  .contacts-sub {
+    font-size: 15px;
+    color: #8b8b96;
+    align-self: flex-start;
+    margin-bottom: 22px;
+  }
+  .contact-list {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+  }
+  .contact-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 16px;
+    border-radius: 20px;
+    background: rgba(255,255,255,.045);
+    border: 1px solid rgba(255,255,255,.06);
+    border-left: 4px solid var(--accent, transparent);
+    box-shadow: 0 4px 16px rgba(0,0,0,.22);
+    cursor: pointer;
+    text-align: left;
+    transition: background .15s, transform .1s;
+  }
+  .contact-row:active { transform: scale(.98); background: rgba(255,255,255,.08); }
+  .contact-avatar-sm {
+    width: 56px; height: 56px; border-radius: 50%;
+    flex: none;
+    display: grid; place-items: center;
+    box-shadow: inset 0 2px 0 rgba(255,255,255,.25), 0 6px 16px rgba(0,0,0,.4);
+  }
+  .contact-avatar-sm svg { width: 36px; height: 36px; }
+  .contact-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .contact-name { font-size: 18px; font-weight: 600; }
+  .contact-sub { font-size: 13px; color: #8b8b96; }
+  .call-icon-btn {
+    width: 42px; height: 42px; border-radius: 50%; flex: none;
+    display: grid; place-items: center;
+    background: rgba(47,195,90,.16);
+  }
+  .call-icon-btn svg { width: 19px; height: 19px; fill: #3ed673; }
+
+  /* ---------------------------------------------------------- аватар (большой) */
+  .avatar {
+    width: 168px;
+    height: 168px;
+    border-radius: 50%;
+    background: linear-gradient(160deg, var(--accent) 0%, var(--accent) 45%, var(--accent2) 100%);
+    display: grid;
+    place-items: center;
+    box-shadow: 0 22px 60px rgba(0,0,0,.55), inset 0 2px 0 rgba(255,255,255,.25);
+    position: relative;
+    flex: none;
+  }
+  .avatar svg { width: 116px; height: 116px; }
+  /* фото/видео персонажа заполняет кружок целиком */
+  .avatar img, .avatar video {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+    display: block;
+  }
+  .contact-avatar-sm img, .contact-avatar-sm video {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+    display: block;
+  }
+  /* пока персонаж говорит — мягкое свечение вокруг фото */
+  .talking .avatar { box-shadow: 0 22px 60px rgba(0,0,0,.55), 0 0 0 4px rgba(255,255,255,.18); }
+  .avatar::after {
+    content: "";
+    position: absolute;
+    inset: -14px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.28);
+    opacity: 0;
+  }
+  .ringing .avatar::after { animation: halo 1.6s ease-out infinite; }
+  @keyframes halo {
+    0%   { transform: scale(.94); opacity: .7; }
+    100% { transform: scale(1.25); opacity: 0; }
+  }
+  /* Пока нет анализа звука (запасной голос браузера) — простое покачивание. */
+  .talking .avatar { animation: bump .55s ease-in-out infinite alternate; }
+  @keyframes bump { to { transform: scale(1.045); } }
+
+  /* Когда звук анализируется — аватар живёт в такт реальной громкости голоса.
+     --voice ставится из JS в диапазоне 0..1 на каждом кадре. */
+  .voice-driven .avatar {
+    animation: none;
+    transform: scale(calc(1 + var(--voice, 0) * 0.1))
+               translateY(calc(var(--voice, 0) * -4px));
+    transition: transform .05s linear;
+  }
+  .voice-driven .avatar {
+    box-shadow:
+      0 22px 60px rgba(0,0,0,.55),
+      0 0 0 calc(2px + var(--voice, 0) * 10px) rgba(255,255,255,calc(.06 + var(--voice, 0) * .22));
+  }
+
+  /* «оживший» аватар: болтает ртом пока идёт озвучка, изредка моргает */
+  .avatar .pupils {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: blink 4.5s ease-in-out infinite;
+  }
+  @keyframes blink {
+    0%, 92%, 100% { transform: scaleY(1); }
+    95% { transform: scaleY(.12); }
+  }
+  .avatar .mouth-closed,
+  .avatar .mouth-open { transform-box: fill-box; transform-origin: center; }
+  .talking .avatar .mouth-closed { animation: mouth-closed .32s steps(1) infinite; }
+  .talking .avatar .mouth-open { animation: mouth-open .32s steps(1) infinite; }
+  @keyframes mouth-closed { 0%, 100% { opacity: .92; } 50% { opacity: 0; } }
+  @keyframes mouth-open   { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+
+  .caller { font-size: 34px; font-weight: 600; margin: 28px 0 6px; letter-spacing: -.4px; flex-shrink: 0; }
+  .status { font-size: 17px; color: #a0a0ab; min-height: 24px; flex-shrink: 0; }
+
+  /* ------------------------------------------------------- эквалайзер */
+  .bars { display: flex; gap: 5px; align-items: flex-end; height: 34px; margin-top: 22px; opacity: 0; transition: opacity .25s; flex-shrink: 0; }
+  .bars.on { opacity: 1; }
+  .bars i {
+    width: 5px; height: 8px; border-radius: 3px;
+    background: rgba(255,255,255,.85);
+    animation: eq .9s ease-in-out infinite;
+  }
+  .bars i:nth-child(2) { animation-delay: .12s }
+  .bars i:nth-child(3) { animation-delay: .24s }
+  .bars i:nth-child(4) { animation-delay: .36s }
+  .bars i:nth-child(5) { animation-delay: .48s }
+  @keyframes eq { 0%,100% { height: 8px } 50% { height: 32px } }
+
+  /* --------------------------------------------------- индикатор слушания */
+  .mic-dot { display: none; align-items: center; gap: 8px; margin-top: 22px; opacity: 0; transition: opacity .25s; }
+  .mic-dot.on { opacity: 1; display: flex; }
+  .mic-dot .pulse {
+    width: 12px; height: 12px; border-radius: 50%; background: #3ed673;
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.5); opacity: .5; } }
+
+  /* --------------------------------------------------------- субтитры */
+  /* Длинный ответ персонажа раньше вылезал ЗА пределы плашки — вверх и вниз
+     сразу. Причина: flex + align-items:center при контенте выше контейнера
+     переполняет его симметрично в обе стороны, поверх имени и статуса.
+     Лечение: safe center (никогда не выпускает контент за верхний край) плюс
+     собственная прокрутка внутри плашки.
+     Высоту НЕ фиксируем: плашка сжимается ровно до свободного места
+     (flex-shrink), поэтому экран целиком никогда не уезжает в прокрутку —
+     иначе поверх макета появлялся второй, крупный скроллбар. */
+  /* Сама плашка — только рамка и фон, она НЕ прокручивается. Прокрутка и
+     затухание живут на внутреннем .caption-text, иначе маска гасила бы
+     заодно рамку с фоном и плашка выглядела бы «размытой» по краям. */
+  .caption {
+    margin-top: auto;
+    width: 100%;
+    min-height: 76px;
+    flex-shrink: 1;
+    color: #dcdce4;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px 18px;
+    background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 22px;
+    box-sizing: border-box;
+    box-shadow: 0 8px 26px rgba(0,0,0,.28);
+    overflow: hidden;
+    transition: background .2s, border-color .2s;
+  }
+  .caption.is-empty { background: transparent; border-color: transparent; box-shadow: none; }
+  .caption.me { color: #8fd6a0; font-style: italic; }
+
+  .caption-text {
+    width: 100%;
+    max-height: 100%;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+    font-size: 19px;
+    line-height: 1.45;
+    /* Мягкое затухание у краёв: длинный текст не обрывается «ножом» по
+       границе плашки, а тает — сразу видно, что дальше есть продолжение. */
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+  }
+  /* Короткая реплика целиком помещается — гасить нечего, маску убираем,
+     иначе у одной строки подъедаются верх и низ букв. */
+  .caption-text.fits { -webkit-mask-image: none; mask-image: none; }
+
+  /* Тонкий ненавязчивый скроллбар вместо системного «толстого» */
+  .caption-text::-webkit-scrollbar { width: 5px; }
+  .caption-text::-webkit-scrollbar-track { background: transparent; }
+  .caption-text::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.2);
+    border-radius: 3px;
+  }
+  .caption-text { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.2) transparent; }
+
+  /* Три плавающие точки вместо голого «думает…» — понятнее ребёнку без слов */
+  .thinking-dots { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+  .thinking-dots i {
+    width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+    animation: think-bounce 1.1s ease-in-out infinite;
+  }
+  .thinking-dots i:nth-child(2) { animation-delay: .15s }
+  .thinking-dots i:nth-child(3) { animation-delay: .3s }
+  @keyframes think-bounce { 0%, 80%, 100% { opacity: .3; transform: translateY(0) } 40% { opacity: 1; transform: translateY(-4px) } }
+
+  /* ---------------------------------------------------------- кнопки */
+  .actions { display: flex; gap: 64px; margin-top: 28px; }
+  .btn {
+    width: 76px; height: 76px; border-radius: 50%; border: 0;
+    display: grid; place-items: center; cursor: pointer;
+    box-shadow: 0 10px 26px rgba(0,0,0,.45);
+    transition: transform .12s;
+  }
+  .btn:active { transform: scale(.9); }
+  .btn svg { width: 34px; height: 34px; fill: #fff; }
+  .btn.answer { background: #2fc35a; }
+  .btn.decline, .btn.hangup { background: #f0353b; }
+  .btn.decline svg, .btn.hangup svg { transform: rotate(135deg); }
+  .ringing .btn.answer { animation: jiggle 1.4s ease-in-out infinite; }
+  @keyframes jiggle {
+    0%,72%,100% { transform: translateY(0) }
+    80% { transform: translateY(-9px) }
+    88% { transform: translateY(0) }
+  }
+  .btn-label { margin-top: 10px; font-size: 13px; color: #8b8b96; }
+  .action-col { display: flex; flex-direction: column; align-items: center; }
+
+  .error {
+    margin-top: 14px; font-size: 14px; color: #ff8b8b;
+    max-width: 340px; line-height: 1.5; min-height: 20px;
+  }
+</style>
+</head>
+<body>
+
+<!-- =========================================================== контакты -->
+<div class="screen active" id="screen-contacts">
+  <div class="contacts-title">Друзья</div>
+  <div class="contacts-sub">Нажми, чтобы позвонить</div>
+  <div class="contact-list" id="contact-list"></div>
+</div>
+
+<!-- ============================================ экран входящего вызова -->
+<div class="screen ringing" id="screen-incoming">
+  <div class="avatar" id="avatar-1"></div>
+  <div class="caller" id="caller-1">…</div>
+  <div class="status" id="subtitle-1">мобильный</div>
+  <div class="caption">вызов…</div>
+  <div class="actions">
+    <div class="action-col">
+      <button class="btn decline" id="btn-decline" aria-label="Отклонить">
+        <svg viewBox="0 0 24 24"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .8-.2 1l-2.3 2.2z"/></svg>
+      </button>
+      <span class="btn-label">Отклонить</span>
+    </div>
+    <div class="action-col">
+      <button class="btn answer" id="btn-answer" aria-label="Ответить">
+        <svg viewBox="0 0 24 24"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .8-.2 1l-2.3 2.2z"/></svg>
+      </button>
+      <span class="btn-label">Ответить</span>
+    </div>
+  </div>
+</div>
+
+<!-- ==================================================== экран разговора -->
+<div class="screen" id="screen-call">
+  <div class="avatar" id="avatar-2"></div>
+  <div class="caller" id="caller-2">…</div>
+  <div class="status" id="status">соединение…</div>
+  <div class="bars" id="bars"><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="mic-dot" id="mic-dot"><span class="pulse"></span><span>слушаю…</span></div>
+  <div class="caption is-empty" id="caption"><div class="caption-text" id="caption-text"></div></div>
+  <div class="error" id="error"></div>
+  <div class="actions">
+    <div class="action-col">
+      <button class="btn hangup" id="btn-hangup" aria-label="Завершить">
+        <svg viewBox="0 0 24 24"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .8-.2 1l-2.3 2.2z"/></svg>
+      </button>
+      <span class="btn-label">Завершить</span>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ------------------------------------------------------------- SVG-аватары
+// Простые дружелюбные "лица" машинок — глаза-фары + улыбка-решётка радиатора.
+// Не копируют конкретный кадр мультфильма, только цвет и деталь-акцент на брата.
+function carFaceSvg(accessory) {
+  return `
+  <svg viewBox="0 0 100 100" aria-hidden="true">
+    <ellipse cx="50" cy="58" rx="40" ry="34" fill="rgba(0,0,0,.14)"/>
+    <circle cx="34" cy="46" r="10" fill="#fff"/>
+    <circle cx="66" cy="46" r="10" fill="#fff"/>
+    <g class="pupils">
+      <circle cx="34" cy="46" r="4.5" fill="#1a1a1a"/>
+      <circle cx="66" cy="46" r="4.5" fill="#1a1a1a"/>
+    </g>
+    <path class="mouth-closed" d="M32 70 Q50 82 68 70" stroke="#fff" stroke-width="5" fill="none" stroke-linecap="round" opacity=".92"/>
+    <path class="mouth-open" d="M31 68 Q50 94 69 68 Q50 80 31 68 Z" fill="#1a1a1a" opacity="0"/>
+    ${accessory}
+  </svg>`;
+}
+
+const AVATARS = {
+  mcqueen: carFaceSvg(`
+    <g transform="translate(50 20) scale(.5)">
+      <path d="M0-30 -16 10h10l-5 32 21-36H10l6-24z" fill="#ffd233"/>
+    </g>
+  `),
+  mater: carFaceSvg(`
+    <g transform="translate(78 62)">
+      <rect x="-4" y="-14" width="8" height="22" rx="3" fill="#c9c2b4"/>
+      <circle cx="0" cy="10" r="6" fill="#c9c2b4"/>
+    </g>
+  `),
+  doc: carFaceSvg(`
+    <g transform="translate(50 22)">
+      <path d="M0-12 3-4h8l-6 5 2 8-7-5-7 5 2-8-6-5h8z" fill="#ffe066"/>
+    </g>
+  `),
+};
+
+// Фото персонажа — для списка «Друзья» и экрана входящего вызова.
+function renderAvatarImage(node, contact) {
+  if (contact.avatarImage) {
+    node.innerHTML = `<img src="${contact.avatarImage}" alt="">`;
+  } else {
+    node.innerHTML = AVATARS[contact.avatar] || AVATARS.mcqueen;
+  }
+}
+
+// Экран разговора: видео «персонаж говорит» (без звука, крутится только пока
+// идёт озвучка). Нет видео — показываем фото, нет фото — запасной SVG.
+function renderAvatarTalking(node, contact) {
+  if (contact.avatarVideo) {
+    node.innerHTML = `<video src="${contact.avatarVideo}" loop muted playsinline preload="auto"></video>`;
+  } else {
+    renderAvatarImage(node, contact);
+  }
+}
+
+function setAvatarPlaying(on) {
+  for (const video of document.querySelectorAll('.avatar video')) {
+    if (on) video.play().catch(() => {});
+    else video.pause();
+  }
+}
+
+// ------------------------------------------------------------- состояние
+const el = (id) => document.getElementById(id);
+const screens = {
+  contacts: el('screen-contacts'),
+  incoming: el('screen-incoming'),
+  call: el('screen-call'),
+};
+
+let contacts = [];
+let current = null;    // выбранный контакт (объект из /api/contacts)
+let history = [];      // [{role:'user'|'assistant', content:'…'}]
+let callActive = false;
+let recognition = null;
+let listening = false;
+let audioCtx = null;
+let ringTimer = null;
+let currentAudio = null;
+
+// -------------------------------------------------- голос двигает аватар
+// AnalyserNode читает громкость реальной озвучки Fish Audio 60 раз в секунду
+// и пишет её в CSS-переменную --voice на аватаре — так покачивание и свечение
+// вокруг фото идут ровно в такт настоящей речи, а не по придуманной петле.
+let voiceAnalyser = null;
+let voiceSource = null;
+let voiceRafId = null;
+
+function connectVoiceAnalyser(audioEl) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (!voiceAnalyser) {
+      voiceAnalyser = audioCtx.createAnalyser();
+      voiceAnalyser.fftSize = 256;
+      voiceAnalyser.smoothingTimeConstant = 0.6;
+    }
+    // Каждая реплика — новый <audio>, а значит и новый MediaElementSource
+    // (он одноразовый на элемент). Отключаем предыдущий, чтобы не копились узлы.
+    if (voiceSource) { try { voiceSource.disconnect(); } catch {} }
+    voiceSource = audioCtx.createMediaElementSource(audioEl);
+    voiceSource.connect(voiceAnalyser);
+    voiceAnalyser.connect(audioCtx.destination);
+    return true;
+  } catch {
+    return false; // CORS/повторное подключение — не страшно, останется покачивание по умолчанию
+  }
+}
+
+function startVoiceLoop() {
+  if (!voiceAnalyser) return;
+  const data = new Uint8Array(voiceAnalyser.frequencyBinCount);
+  const avatarNode = el('avatar-2');
+  screens.call.classList.add('voice-driven');
+
+  const tick = () => {
+    voiceAnalyser.getByteFrequencyData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) sum += data[i];
+    const level = Math.min(1, (sum / data.length / 255) * 2.2); // немного усиливаем — тихая речь тоже должна быть заметна
+    avatarNode.style.setProperty('--voice', level.toFixed(3));
+    voiceRafId = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function stopVoiceLoop() {
+  if (voiceRafId) cancelAnimationFrame(voiceRafId);
+  voiceRafId = null;
+  screens.call.classList.remove('voice-driven');
+  el('avatar-2')?.style.setProperty('--voice', 0);
+}
+
+// ------------------------------------------------------------- интерфейс
+function showScreen(name) {
+  for (const [key, node] of Object.entries(screens)) {
+    node.classList.toggle('active', key === name);
+  }
+}
+
+function applyTheme(c) {
+  document.documentElement.style.setProperty('--accent', c.accent);
+  document.documentElement.style.setProperty('--accent2', c.accent2 || c.accent);
+}
+
+function setStatus(text) { el('status').textContent = text; }
+
+// «Думает…» — с тремя плавающими точками вместо голого текста, понятнее
+// ребёнку, что сейчас видимая пауза, а не зависание.
+function setThinking() {
+  const node = el('status');
+  node.textContent = '';
+  node.append('думает', Object.assign(document.createElement('span'), {
+    className: 'thinking-dots',
+    innerHTML: '<i></i><i></i><i></i>',
+  }));
+}
+
+function setCaption(text, mine = false) {
+  const box = el('caption');
+  const node = el('caption-text');
+  node.textContent = text;
+  box.classList.toggle('me', mine);
+  box.classList.toggle('is-empty', !text);
+  // Реплика целиком влезла — снимаем затухание краёв (гасить нечего) и
+  // показываем текст с начала, а не с того места, где он стоял до этого.
+  node.scrollTop = 0;
+  node.classList.toggle('fits', node.scrollHeight <= node.clientHeight);
+}
+
+function setTalking(on) {
+  screens.call.classList.toggle('talking', on);
+  el('bars').classList.toggle('on', on);
+  setAvatarPlaying(on);
+  if (on) el('mic-dot').classList.remove('on');
+}
+
+function setListeningIndicator(on) {
+  el('mic-dot').classList.toggle('on', on);
+}
+
+function showError(text) { el('error').textContent = text || ''; }
+
+// --------------------------------------------------------------- рингтон
+function startRingtone() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  } catch { return; }
+
+  const beep = (startAt) => {
+    for (const freq of [440, 480]) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, startAt);
+      gain.gain.linearRampToValueAtTime(0.12, startAt + 0.05);
+      gain.gain.setValueAtTime(0.12, startAt + 0.9);
+      gain.gain.linearRampToValueAtTime(0, startAt + 1.0);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(startAt);
+      osc.stop(startAt + 1.05);
+    }
+  };
+
+  const cycle = () => {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    beep(now);
+    beep(now + 2);
+  };
+
+  cycle();
+  ringTimer = setInterval(cycle, 4000);
+}
+
+function stopRingtone() {
+  clearInterval(ringTimer);
+  ringTimer = null;
+}
+
+// ------------------------------------------------------- сеть: реплика
+async function askCharacter(userText) {
+  history.push({ role: 'user', content: userText });
+
+  const response = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ history, character: current.id }),
+  });
+
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Сервер не ответил');
+
+  history.push({ role: 'assistant', content: data.reply });
+  return data.reply;
+}
+
+// ---------------------------------------------------------- сеть: голос
+async function speak(text) {
+  // КРИТИЧНО: пока персонаж говорит, микрофон должен молчать. Раньше
+  // распознавание работало непрерывно и слышало собственную колонку —
+  // телефон принимал голос Маквина за речь ребёнка, засорял историю
+  // мусором и путал контекст следующего ответа. Останавливаем здесь —
+  // единая точка для приветствия, обычных ответов и текста при ошибке.
+  pauseListening();
+
+  setTalking(true);
+  setCaption(text);
+  setStatus('говорит…');
+
+  try {
+    if (!current.ttsReady) throw new Error('нет ключа Fish Audio');
+
+    const response = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, character: current.id }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || `TTS ${response.status}`);
+    }
+
+    const url = URL.createObjectURL(await response.blob());
+    // ВАЖНО: раньше провал currentAudio.play() (например, браузер заблокировал
+    // автовоспроизведение на телефоне) тихо «резолвил» промис как будто всё
+    // прошло нормально — ни звука, ни ошибки, ни голоса браузера взамен.
+    // Ребёнок звонит, персонаж «отвечает», а по факту полная тишина и никакого
+    // признака, что что-то сломалось. Теперь провал play() тоже считается
+    // ошибкой и падает в тот же catch ниже — включается голос браузера.
+    await new Promise((resolve, reject) => {
+      currentAudio = new Audio(url);
+      currentAudio.crossOrigin = 'anonymous';
+
+      const cleanup = () => {
+        stopVoiceLoop();
+        URL.revokeObjectURL(url);
+        currentAudio = null;
+      };
+      currentAudio.onended = () => { cleanup(); resolve(); };
+      currentAudio.onerror = () => { cleanup(); reject(new Error('ошибка воспроизведения аудио')); };
+
+      currentAudio.play()
+        .then(() => {
+          if (connectVoiceAnalyser(currentAudio)) startVoiceLoop();
+        })
+        .catch((playError) => { cleanup(); reject(playError); });
+    });
+  } catch (error) {
+    showError('Голос персонажа недоступен (' + error.message + '), включён голос браузера.');
+    await new Promise((resolve) => {
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'ru-RU';
+      utterance.rate = 1.05;
+      utterance.onend = utterance.onerror = resolve;
+      speechSynthesis.speak(utterance);
+    });
+  }
+
+  setTalking(false);
+}
+
+// ------------------------------------------------------ распознавание речи
+//
+// Раньше распознавание перезапускалось после каждой короткой паузы и
+// «съедало» начало фразы — казалось, что слышно только последнее слово.
+// Теперь сессия непрерывная (continuous = true): все промежуточные и
+// финальные куски копятся в буфер, а отправляем накопленное только после
+// ~1.1 секунды тишины — то есть когда ребёнок явно закончил говорить.
+const SILENCE_MS = 1100;
+let finalBuffer = '';
+let silenceTimer = null;
+
+function createRecognition() {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) return null;
+
+  const rec = new Recognition();
+  rec.lang = 'ru-RU';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+
+  rec.onresult = (event) => {
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const chunk = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        finalBuffer = (finalBuffer + ' ' + chunk).trim();
+      } else {
+        interim += chunk;
+      }
+    }
+
+    setCaption((finalBuffer + ' ' + interim).trim(), true);
+
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(commitUtterance, SILENCE_MS);
+  };
+
+  rec.onerror = (event) => {
+    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+      showError('Микрофон запрещён. Разреши доступ в адресной строке Chrome и позвони снова.');
+      setStatus('нет доступа к микрофону');
+      listening = false;
+      return;
+    }
+    // no-speech / aborted / network — движок сам перезапустится через onend
+  };
+
+  rec.onend = () => {
+    // continuous-сессия иногда сама обрывается (тишина, лимит браузера) —
+    // тихо перезапускаем, если звонок всё ещё активен и мы не в разговоре.
+    if (listening && callActive) {
+      try { rec.start(); } catch {}
+    }
+  };
+
+  return rec;
+}
+
+async function commitUtterance() {
+  const text = finalBuffer.trim();
+  finalBuffer = '';
+  if (!text || !callActive) return;
+
+  setCaption(text, true);
+  setThinking();
+
+  try {
+    const reply = await askCharacter(text);
+    if (!callActive) return;
+    await speak(reply);
+  } catch (error) {
+    showError(error.message);
+    if (callActive) await speak('Ой, связь пропала на секунду. Скажи ещё разок?');
+  }
+
+  if (callActive) listen();
+}
+
+function listen() {
+  if (!callActive || !recognition) return;
+  setStatus('слушаю тебя…');
+  setListeningIndicator(true);
+  listening = true;
+  finalBuffer = '';
+  clearTimeout(silenceTimer);
+  try {
+    recognition.start();
+  } catch {
+    // start() кидает, если уже запущено — это нормально
+  }
+}
+
+function pauseListening() {
+  listening = false;
+  setListeningIndicator(false);
+  clearTimeout(silenceTimer);
+  try { recognition && recognition.stop(); } catch {}
+}
+
+// ------------------------------------------------------------ жизнь звонка
+function openIncoming(contact) {
+  current = contact;
+  applyTheme(contact);
+
+  el('caller-1').textContent = contact.displayName;
+  el('subtitle-1').textContent = contact.subtitle;
+  renderAvatarImage(el('avatar-1'), contact);
+  document.title = 'Входящий: ' + contact.displayName;
+
+  showError('');
+  showScreen('incoming');
+  startRingtone();
+}
+
+async function answerCall() {
+  stopRingtone();
+  if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume();
+
+  // Подгружаем полную карточку персонажа (greeting, ttsReady) перед стартом.
+  current = await fetch('/api/character?id=' + current.id).then((r) => r.json());
+  applyTheme(current);
+
+  callActive = true;
+  history = [];
+  showError('');
+  showScreen('call');
+  el('caller-2').textContent = current.displayName;
+  renderAvatarTalking(el('avatar-2'), current);
+  setStatus('соединение…');
+  setCaption('');
+
+  recognition = createRecognition();
+  if (!recognition) {
+    showError('Распознавание речи есть только в Chrome. Открой страницу в Google Chrome.');
+  }
+
+  await speak(current.greeting);
+  history.push({ role: 'assistant', content: current.greeting });
+
+  if (callActive && recognition) listen();
+  else if (callActive) setStatus('нужен Chrome, чтобы говорить');
+}
+
+function endCall() {
+  callActive = false;
+  pauseListening();
+  stopRingtone();
+  setTalking(false);
+
+  try { recognition && recognition.abort(); } catch {}
+  recognition = null;
+
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+  speechSynthesis.cancel();
+  stopVoiceLoop();
+
+  showError('');
+  showScreen('contacts');
+}
+
+// -------------------------------------------------------------- контакты
+function renderContacts() {
+  const list = el('contact-list');
+  list.innerHTML = '';
+
+  for (const contact of contacts) {
+    const row = document.createElement('button');
+    row.className = 'contact-row';
+    row.style.setProperty('--accent', contact.accent);
+    row.style.setProperty('--accent2', contact.accent2 || contact.accent);
+    row.innerHTML = `
+      <span class="contact-avatar-sm" style="background:linear-gradient(160deg, ${contact.accent}, ${contact.accent2 || contact.accent})">
+        ${contact.avatarImage
+          ? `<img src="${contact.avatarImage}" alt="">`
+          : AVATARS[contact.avatar] || AVATARS.mcqueen}
+      </span>
+      <span class="contact-info">
+        <span class="contact-name">${contact.displayName}</span>
+        <span class="contact-sub">${contact.subtitle}</span>
+      </span>
+      <span class="call-icon-btn">
+        <svg viewBox="0 0 24 24"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .8-.2 1l-2.3 2.2z"/></svg>
+      </span>`;
+    row.addEventListener('click', () => openIncoming(contact));
+    list.appendChild(row);
+  }
+}
+
+// ------------------------------------------------------------------ старт
+(async function init() {
+  const data = await fetch('/api/contacts').then((r) => r.json());
+  contacts = data.contacts;
+  renderContacts();
+
+  el('btn-answer').addEventListener('click', () => {
+    // Разблокируем воспроизведение аудио СИНХРОННО, в момент самого клика.
+    // Внутри answerCall() до реального currentAudio.play() проходит два
+    // await (запрос карточки персонажа, запрос озвучки) — на некоторых
+    // браузерах (особенно iPhone) это может «остудить» разрешение на
+    // автовоспроизведение, полученное от жеста пользователя. Пустой play()
+    // прямо здесь, без задержек, надёжно закрывает этот случай заранее.
+    try { new Audio().play().catch(() => {}); } catch {}
+    answerCall();
+  });
+  el('btn-decline').addEventListener('click', () => {
+    stopRingtone();
+    showScreen('contacts');
+  });
+  el('btn-hangup').addEventListener('click', endCall);
+
+  // Рингтон/аудио требуют пользовательского жеста — разблокируем на первый клик.
+  const unlock = () => {
+    try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+    document.removeEventListener('click', unlock);
+  };
+  document.addEventListener('click', unlock);
+})();
+</script>
+</body>
+</html>
