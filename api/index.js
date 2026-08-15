@@ -3,11 +3,11 @@
 // Vercel не запускает долгоживущий сервер: он вызывает функцию на каждый
 // запрос и сам занимается HTTP и сертификатом. Поэтому здесь мы не поднимаем
 // ничего своего, а лишь передаём запрос в тот же обработчик, что и локально
-// (см. handleRequest в server.js) — логика для всех площадок одна.
+// (см. handleRequest в app.js) — логика для всех площадок одна.
 //
 // secure = true, потому что до функции запрос доходит уже после TLS,
 // который завершил сам Vercel: снаружи у пользователя честный https.
-import { handleRequest } from '../server.js';
+import { handleRequest } from '../app.js';
 
 export default function handler(req, res) {
   return handleRequest(req, res, true);
