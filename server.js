@@ -718,12 +718,21 @@ async function handleRequest(req, res, secure) {
   }
 }
 
-const httpServer = createServer((req, res) => handleRequest(req, res, false));
+// На Vercel файл подключается как модуль (см. api/index.js): там свой
+// HTTP-слой, поэтому ничего слушать не надо — иначе функция зависнет.
+// Наружу отдаём только обработчик запросов.
+export { handleRequest };
+
+const isServerless = Boolean(process.env.VERCEL);
 
 // На хостинге сертификат выдаёт сам провайдер, а openssl там может и не быть.
 // Поднимаем локальный HTTPS только на своём компьютере — в облаке он лишний
 // и лишь тратит время старта.
-const isHosted = Boolean(process.env.RENDER || process.env.PORT_FROM_HOST || process.env.FLY_APP_NAME);
+const isHosted = isServerless || Boolean(process.env.RENDER || process.env.FLY_APP_NAME);
+
+if (!isServerless) {
+
+const httpServer = createServer((req, res) => handleRequest(req, res, false));
 
 const lanIPs = getLanIPv4s();
 let httpsServer = null;
@@ -765,3 +774,5 @@ if (httpsServer) {
     console.log('');
   });
 }
+
+} // конец блока «обычный запуск, не serverless»
