@@ -154,12 +154,28 @@ const HTTPS_PORT = Number(process.env.HTTPS_PORT ?? 3443);
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? '';
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY ?? '';
 const NVIDIA_MODEL = process.env.NVIDIA_MODEL || 'meta/llama-3.3-70b-instruct';
-const GROQ_API_KEY = process.env.GROQ_API_KEY ?? '';
+// Ключей Groq может быть несколько через запятую. Смысл: суточный лимит
+// (100 000 токенов) считается на КАЖДЫЙ ключ отдельно, поэтому когда один
+// упирается в потолок, мы просто переходим к следующему — вместо того
+// чтобы сваливаться в банк заготовленных фраз посреди разговора.
+const GROQ_API_KEYS = (process.env.GROQ_API_KEY ?? '')
+  .split(/[,\s]+/)
+  .map((k) => k.trim())
+  .filter(Boolean);
+const GROQ_API_KEY = GROQ_API_KEYS[0] ?? '';
 // llama-3.3-70b-versatile — не самая мелкая модель на Groq, но всё равно
 // быстрая (0.6-0.9с на LPU-чипах), а на понимание контекста и связность
 // ответов на порядок лучше 8b-instant: та мелкая модель путалась в логике
 // и несла что-то не по делу даже при простых вопросах.
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+// Запасная модель — на случай, когда ВСЕ ключи упёрлись в суточный лимит
+// именно по основной модели: лимиты считаются отдельно и на каждую модель.
+// 8b слабее в связности, но отвечает по-русски живо, с эмоциями и мгновенно
+// (0.35с) — несравнимо лучше, чем свалиться в банк заготовленных фраз.
+// gpt-oss-120b и qwen3.6 на Groq не годятся: первый вернул пустой ответ,
+// второй выводит служебные рассуждения <think> прямо в реплику.
+const GROQ_FALLBACK_MODEL = process.env.GROQ_FALLBACK_MODEL || 'llama-3.1-8b-instant';
 const FISH_API_KEY = process.env.FISH_API_KEY ?? '';
 const FISH_MODEL = process.env.FISH_MODEL || 's2.1-pro-free';
 
@@ -530,20 +546,34 @@ async function generateReplyAnthropic(character, history) {
 // Groq (console.groq.com) — тот же OpenAI-совместимый формат, что и NVIDIA,
 // но крутится на их собственных LPU-чипах, а не на общих GPU в очереди.
 // Отсюда и разница на порядок: доли секунды против 10+ секунд.
-async function generateReplyGroq(character, history) {
-  const messages = [
-    { role: 'system', content: character.system },
-    ...history.map((m) => ({ role: m.role, content: m.content })),
-  ];
+// Исчерпанный ключ помним до времени сброса, чтобы не долбиться в него
+// каждым запросом. Groq сам сообщает, когда можно вернуться.
+const groqKeyBlockedUntil = new Map();
 
+// Из «Please try again in 12m7.488s» достаём миллисекунды.
+function parseGroqRetryMs(detail) {
+  const m = /try again in (?:(\d+)m)?([\d.]+)s/i.exec(detail || '');
+  if (!m) return 60_000;
+  return (Number(m[1] || 0) * 60 + parseFloat(m[2])) * 1000;
+}
+
+function availableGroqKeys() {
+  const now = Date.now();
+  const free = GROQ_API_KEYS.filter((k) => (groqKeyBlockedUntil.get(k) ?? 0) <= now);
+  // Все до одного на паузе — всё равно пробуем: вдруг сброс уже случился,
+  // а мы просто неточно распарсили время.
+  return free.length ? free : GROQ_API_KEYS;
+}
+
+async function callGroq(apiKey, model, messages) {
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${GROQ_API_KEY}`,
+      authorization: `Bearer ${apiKey}`,
       'content-type': 'application/json',
     },
     body: JSON.stringify({
-      model: GROQ_MODEL,
+      model,
       messages,
       max_tokens: 300,
       temperature: 0.7,
@@ -561,18 +591,57 @@ async function generateReplyGroq(character, history) {
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(`Groq API ${response.status}: ${detail.slice(0, 400)}`);
+    const error = new Error(`Groq API ${response.status}: ${detail.slice(0, 300)}`);
+    error.status = response.status;
+    error.detail = detail;
+    throw error;
   }
 
   const data = await response.json();
   const choice = data.choices?.[0];
   const text = choice?.message?.content?.trim();
-  if (!text) return 'Ой, что-то связь барахлит. Повтори-ка ещё разок?';
+  if (!text) throw new Error('Groq вернул пустой ответ');
 
   // finish_reason = 'length' означает, что ответ упёрся в max_tokens и
   // оборван — возможно, на середине слова. Такой хвост нельзя отдавать в
   // озвучку: ребёнок услышит невнятный обрубок.
   return choice.finish_reason === 'length' ? trimUnfinishedTail(text) : text;
+}
+
+async function generateReplyGroq(character, history) {
+  const messages = [
+    { role: 'system', content: character.system },
+    ...history.map((m) => ({ role: m.role, content: m.content })),
+  ];
+
+  let lastError = null;
+
+  // Сначала перебираем ключи на хорошей модели, и только когда ВСЕ упёрлись
+  // в её суточный лимит — те же ключи на запасной: лимит считается отдельно
+  // по каждой паре «ключ + модель».
+  for (const model of [GROQ_MODEL, GROQ_FALLBACK_MODEL]) {
+    for (const apiKey of availableGroqKeys()) {
+      try {
+        return await callGroq(apiKey, model, messages);
+      } catch (error) {
+        lastError = error;
+        const tail = apiKey.slice(-6);
+
+        if (error.status === 429) {
+          const waitMs = parseGroqRetryMs(error.detail);
+          groqKeyBlockedUntil.set(apiKey, Date.now() + waitMs);
+          console.warn(`[Groq: ключ …${tail} исчерпан на ${model}, пауза ${Math.round(waitMs / 1000)}с, беру следующий]`);
+          continue;
+        }
+
+        // Не лимит (сеть, таймаут, сбой) — пробуем следующий ключ, но этот
+        // не наказываем: он, скорее всего, исправен.
+        console.warn(`[Groq: ключ …${tail} не ответил на ${model}: ${error.message.slice(0, 120)}]`);
+      }
+    }
+  }
+
+  throw lastError ?? new Error('Groq: нет доступных ключей');
 }
 
 // NVIDIA NIM (build.nvidia.com/integrate.api.nvidia.com) — OpenAI-совместимый
