@@ -447,6 +447,58 @@ let audioCtx = null;
 let ringTimer = null;
 let currentAudio = null;
 
+// ------------------------------------------- «в один голос»: глушим всё лишнее
+//
+// Персонаж должен звучать РОВНО одной репликой за раз. Раньше это не
+// гарантировалось ничем, и получался баг: длинная фраза обрывалась, ребёнок
+// отвечал — а после его ответа персонаж вдруг договаривал недосказанное.
+// Причин было две, и обе лечатся здесь:
+//
+//   1) speechSynthesis (голос браузера) — это ОЧЕРЕДЬ. На телефоне длинная
+//      фраза обрывается по лимиту движка, но её хвост остаётся в очереди и
+//      доигрывает при следующем speak(). Поэтому cancel() перед каждой речью.
+//   2) currentAudio просто перезаписывался новым Audio. Старый элемент при
+//      этом продолжал играть, а ссылка на него терялась — остановить его
+//      было уже нечем. Поэтому останавливаем явно, и не pause(), а с
+//      обрывом источника: pause() лишь замирает, и звук может ожить.
+//
+// speechToken — «поколение» речи. Любой запуск новой речи или сброс делает
+// все предыдущие просроченными: они молча выходят, а не продолжают работу.
+let speechToken = 0;
+let abortCurrentSpeech = null;
+
+function stopSpeaking() {
+  speechToken++;
+
+  // ПОРЯДОК ВАЖЕН. Сначала забираем и глушим звук, и только потом будим
+  // ожидающего. Наоборот нельзя: колбэк пробуждения внутри себя обнуляет
+  // currentAudio, и проверка «есть что останавливать» тут же становится
+  // ложной — звук остаётся играть, а ссылка на него теряется навсегда.
+  // Ровно так и получалось, что персонаж договаривал прошлую реплику.
+  const audio = currentAudio;
+  currentAudio = null;
+  if (audio) {
+    try {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.src = '';   // одного pause() мало: элемент может ожить и доиграть
+      audio.load();
+    } catch {}
+  }
+
+  // Разбудить того, кто ждёт окончания уже неактуальной речи, иначе его
+  // await повиснет навсегда (обработчики выше мы сняли).
+  if (abortCurrentSpeech) {
+    const wake = abortCurrentSpeech;
+    abortCurrentSpeech = null;
+    try { wake(); } catch {}
+  }
+
+  try { speechSynthesis.cancel(); } catch {}
+  stopVoiceLoop();
+}
+
 // -------------------------------------------------- голос двигает аватар
 // AnalyserNode читает громкость реальной озвучки Fish Audio 60 раз в секунду
 // и пишет её в CSS-переменную --voice на аватаре — так покачивание и свечение
@@ -619,9 +671,15 @@ async function speak(text) {
   // единая точка для приветствия, обычных ответов и текста при ошибке.
   pauseListening();
 
-  // Если звонок уже завершили до того, как мы вообще начали (например,
-  // повесили трубку прямо во время «думает…») — говорить нечего и некому.
-  if (!callActive) return;
+  // Добиваем всё, что могло ещё звучать или лежать в очереди браузера,
+  // и получаем номер своего «поколения» речи.
+  stopSpeaking();
+  const myTurn = speechToken;
+
+  // Просрочены или звонок уже завершён (например, трубку повесили прямо
+  // во время «думает…») — говорить нечего и некому.
+  const stillMine = () => callActive && myTurn === speechToken;
+  if (!stillMine()) return;
 
   setTalking(true);
   setCaption(text);
@@ -642,10 +700,9 @@ async function speak(text) {
 
     const blob = await response.blob();
     // Синтез длинного ответа (например, целой истории) занимает секунды —
-    // трубку могли повесить, пока мы ждали этот fetch. currentAudio в тот
-    // момент ещё не существовал, endCall() остановить было нечего — без
-    // этой проверки персонаж начинал говорить уже ПОСЛЕ завершения звонка.
-    if (!callActive) { setTalking(false); return; }
+    // за это время могли повесить трубку или начать говорить новую реплику.
+    // Без этой проверки персонаж начинал озвучивать уже неактуальное.
+    if (!stillMine()) { setTalking(false); return; }
 
     const url = URL.createObjectURL(blob);
     // ВАЖНО: раньше провал currentAudio.play() (например, браузер заблокировал
@@ -655,35 +712,59 @@ async function speak(text) {
     // признака, что что-то сломалось. Теперь провал play() тоже считается
     // ошибкой и падает в тот же catch ниже — включается голос браузера.
     await new Promise((resolve, reject) => {
-      currentAudio = new Audio(url);
-      currentAudio.crossOrigin = 'anonymous';
+      const audio = new Audio(url);
+      audio.crossOrigin = 'anonymous';
+      currentAudio = audio;
 
+      let done = false;
       const cleanup = () => {
+        if (done) return;
+        done = true;
+        abortCurrentSpeech = null;
         stopVoiceLoop();
         URL.revokeObjectURL(url);
-        currentAudio = null;
+        // Обнуляем ТОЛЬКО если это всё ещё наш элемент: иначе затрём
+        // ссылку на новую реплику, и остановить её станет нечем.
+        if (currentAudio === audio) currentAudio = null;
       };
-      currentAudio.onended = () => { cleanup(); resolve(); };
-      currentAudio.onerror = () => { cleanup(); reject(new Error('ошибка воспроизведения аудио')); };
 
-      currentAudio.play()
+      // Нас прервали (новая реплика или конец звонка) — выходим спокойно,
+      // сам звук уже остановлен внутри stopSpeaking().
+      abortCurrentSpeech = () => { cleanup(); resolve(); };
+
+      audio.onended = () => { cleanup(); resolve(); };
+      audio.onerror = () => { cleanup(); reject(new Error('ошибка воспроизведения аудио')); };
+
+      audio.play()
         .then(() => {
-          if (connectVoiceAnalyser(currentAudio)) startVoiceLoop();
+          if (stillMine() && connectVoiceAnalyser(audio)) startVoiceLoop();
         })
         .catch((playError) => { cleanup(); reject(playError); });
     });
   } catch (error) {
+    if (!stillMine()) { setTalking(false); return; }
     showError('Голос персонажа недоступен (' + error.message + '), включён голос браузера.');
     await new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; abortCurrentSpeech = null; resolve(); };
+
+      // Очередь браузера чистим ещё раз прямо перед подачей: именно её
+      // недочищенный хвост и договаривал прошлую фразу после ответа ребёнка.
+      try { speechSynthesis.cancel(); } catch {}
+
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'ru-RU';
       utterance.rate = 1.05;
-      utterance.onend = utterance.onerror = resolve;
+      utterance.onend = utterance.onerror = finish;
+      abortCurrentSpeech = finish;
+
       speechSynthesis.speak(utterance);
     });
   }
 
-  setTalking(false);
+  // Реплику мог перебить кто-то новый — тогда «говорит…» уже не про нас,
+  // и гасить индикатор должен он, а не мы.
+  if (stillMine()) setTalking(false);
 }
 
 // ------------------------------------------------------ распознавание речи
@@ -708,6 +789,12 @@ function createRecognition() {
   rec.maxAlternatives = 1;
 
   rec.onresult = (event) => {
+    // stop() у распознавания срабатывает не мгновенно — «хвост» результатов
+    // прилетает уже после него, в том числе эхо собственного голоса
+    // персонажа из динамика. Без этой проверки такой хвост заново взводил
+    // таймер тишины и запускал ВТОРОЙ ответ поверх текущей речи.
+    if (!listening || !callActive) return;
+
     let interim = '';
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const chunk = event.results[i][0].transcript;
@@ -745,11 +832,18 @@ function createRecognition() {
   return rec;
 }
 
+// Пока обрабатываем одну реплику ребёнка, вторую не начинаем: иначе к
+// серверу уходят два запроса подряд и два ответа начинают звучать внахлёст.
+let handlingUtterance = false;
+
 async function commitUtterance() {
+  if (handlingUtterance) return;
+
   const text = finalBuffer.trim();
   finalBuffer = '';
   if (!text || !callActive) return;
 
+  handlingUtterance = true;
   setCaption(text, true);
   setThinking();
 
@@ -758,8 +852,11 @@ async function commitUtterance() {
     if (!callActive) return;
     await speak(reply);
   } catch (error) {
+    if (!callActive) return;
     showError(error.message);
-    if (callActive) await speak('Ой, связь пропала на секунду. Скажи ещё разок?');
+    await speak('Ой, связь пропала на секунду. Скажи ещё разок?');
+  } finally {
+    handlingUtterance = false;
   }
 
   if (callActive) listen();
@@ -783,6 +880,10 @@ function pauseListening() {
   listening = false;
   setListeningIndicator(false);
   clearTimeout(silenceTimer);
+  // Чистим накопленное: иначе обрывки, распознанные перед самой остановкой
+  // (часто — эхо голоса персонажа), дождутся следующего listen() и уедут
+  // на сервер как будто это сказал ребёнок.
+  finalBuffer = '';
   try { recognition && recognition.stop(); } catch {}
 }
 
@@ -835,13 +936,16 @@ function endCall() {
   pauseListening();
   stopRingtone();
   setTalking(false);
+  handlingUtterance = false;
 
   try { recognition && recognition.abort(); } catch {}
   recognition = null;
 
-  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
-  speechSynthesis.cancel();
-  stopVoiceLoop();
+  // Через общий глушитель, а не «pause() + cancel()» вручную: он обрывает
+  // источник у аудио (одного pause() мало — звук может ожить), чистит
+  // очередь браузера и просрочивает поколение речи, чтобы уже запущенный
+  // speak() не заговорил после того, как трубку положили.
+  stopSpeaking();
 
   showError('');
   showScreen('contacts');
