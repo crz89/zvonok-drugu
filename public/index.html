@@ -467,6 +467,72 @@ let currentAudio = null;
 let speechToken = 0;
 let abortCurrentSpeech = null;
 
+// ------------------------------------------------ один <audio> на весь звонок
+//
+// На iPhone разрешение «можно играть звук» выдаётся НЕ сайту, а конкретному
+// <audio>-элементу, и только в момент касания пользователя. Раньше на каждую
+// реплику создавался new Audio(...) — новый элемент, который никто не касался,
+// поэтому iOS отклонял play() с NotAllowedError, и голос персонажа заменялся
+// роботом браузера. Лечится единственным способом: держать ОДИН элемент,
+// «благословить» его в обработчике клика и дальше только менять ему src.
+let voiceAudio = null;
+
+function getVoiceAudio() {
+  if (!voiceAudio) {
+    voiceAudio = new Audio();
+    voiceAudio.preload = 'auto';
+    voiceAudio.crossOrigin = 'anonymous';
+    // playsInline — чтобы iOS не пытался открыть звук в полноэкранном плеере.
+    voiceAudio.setAttribute('playsinline', '');
+  }
+  return voiceAudio;
+}
+
+// Крошечный валидный WAV: нужен, чтобы «разбудить» элемент настоящим
+// воспроизведением. Пустой src для этого не годится — play() на нём падает.
+function makeSilentWavUrl() {
+  const sr = 8000, n = 8;
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, n * 2, true);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+
+// ВЫЗЫВАТЬ СТРОГО СИНХРОННО из обработчика клика: любой await до этого
+// момента «остужает» жест, и iOS перестаёт считать воспроизведение
+// разрешённым пользователем.
+function unlockVoiceAudio() {
+  const a = getVoiceAudio();
+  try {
+    a.muted = true;
+    const silentUrl = makeSilentWavUrl();
+    a.src = silentUrl;
+
+    // Прибираемся после разблокировки. Важно: этот колбэк асинхронный и
+    // вполне может прилететь, когда персонаж УЖЕ начал говорить — тогда
+    // pause() здесь оборвал бы живую реплику на полуслове. Поэтому трогаем
+    // элемент, только если он всё ещё занят нашей тишиной.
+    const done = () => {
+      a.muted = false;
+      const busyWithSpeech = currentAudio === a || a.src !== silentUrl;
+      if (!busyWithSpeech) {
+        try { a.pause(); a.currentTime = 0; } catch {}
+      }
+      try { URL.revokeObjectURL(silentUrl); } catch {}
+    };
+
+    const p = a.play();
+    if (p && typeof p.then === 'function') p.then(done).catch(done);
+    else done();
+  } catch {
+    a.muted = false;
+  }
+}
+
 function stopSpeaking() {
   speechToken++;
 
@@ -521,12 +587,15 @@ function connectVoiceAnalyser(audioEl) {
       voiceAnalyser.fftSize = 256;
       voiceAnalyser.smoothingTimeConstant = 0.6;
     }
-    // Каждая реплика — новый <audio>, а значит и новый MediaElementSource
-    // (он одноразовый на элемент). Отключаем предыдущий, чтобы не копились узлы.
-    if (voiceSource) { try { voiceSource.disconnect(); } catch {} }
-    voiceSource = audioCtx.createMediaElementSource(audioEl);
-    voiceSource.connect(voiceAnalyser);
-    voiceAnalyser.connect(audioCtx.destination);
+    // <audio> теперь один на весь звонок, а createMediaElementSource можно
+    // вызвать для элемента ТОЛЬКО ОДИН РАЗ — повторный вызов кидает
+    // исключение и оставляет звук без выхода, то есть в тишине.
+    // Поэтому подключаем один раз и дальше просто переиспользуем связку.
+    if (!voiceSource) {
+      voiceSource = audioCtx.createMediaElementSource(audioEl);
+      voiceSource.connect(voiceAnalyser);
+      voiceAnalyser.connect(audioCtx.destination);
+    }
     return true;
   } catch {
     return false; // CORS/повторное подключение — не страшно, останется покачивание по умолчанию
@@ -712,8 +781,11 @@ async function speak(text) {
     // признака, что что-то сломалось. Теперь провал play() тоже считается
     // ошибкой и падает в тот же catch ниже — включается голос браузера.
     await new Promise((resolve, reject) => {
-      const audio = new Audio(url);
-      audio.crossOrigin = 'anonymous';
+      // Тот самый единственный элемент, разблокированный касанием «Ответить».
+      // Создать новый здесь — значит снова получить NotAllowedError на iPhone.
+      const audio = getVoiceAudio();
+      audio.muted = false;
+      audio.src = url;
       currentAudio = audio;
 
       let done = false;
@@ -992,7 +1064,10 @@ function renderContacts() {
     // браузерах (особенно iPhone) это может «остудить» разрешение на
     // автовоспроизведение, полученное от жеста пользователя. Пустой play()
     // прямо здесь, без задержек, надёжно закрывает этот случай заранее.
-    try { new Audio().play().catch(() => {}); } catch {}
+    // Разблокируем ТОТ САМЫЙ элемент, которым потом будет говорить персонаж.
+    // Пустой new Audio().play() тут не помогал: iOS выдаёт разрешение
+    // конкретному элементу, а говорил потом совсем другой, только что созданный.
+    unlockVoiceAudio();
 
     // ВАЖНО: это разблокирует только обычный <audio>. AudioContext (нужен
     // анализатору голоса, который двигает рот и подсветку аватара в такт
