@@ -458,6 +458,12 @@ let voiceRafId = null;
 function connectVoiceAnalyser(audioEl) {
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    // Если контекст так и не проснулся (бывает на iPhone, если жест
+    // пользователя к этому моменту «остыл») — НЕ подключаем createMediaElementSource.
+    // Это не косметика: подключение перехватывает звук элемента целиком, и в
+    // неработающем графе он замолкает без единой ошибки. Лучше потерять
+    // покачивание аватара в такт голосу, чем сам голос.
+    if (audioCtx.state !== 'running') return false;
     if (!voiceAnalyser) {
       voiceAnalyser = audioCtx.createAnalyser();
       voiceAnalyser.fftSize = 256;
@@ -883,6 +889,21 @@ function renderContacts() {
     // автовоспроизведение, полученное от жеста пользователя. Пустой play()
     // прямо здесь, без задержек, надёжно закрывает этот случай заранее.
     try { new Audio().play().catch(() => {}); } catch {}
+
+    // ВАЖНО: это разблокирует только обычный <audio>. AudioContext (нужен
+    // анализатору голоса, который двигает рот и подсветку аватара в такт
+    // речи) в WebKit на iPhone — ОТДЕЛЬНАЯ блокировка, снимается отдельно.
+    // Без этого на iPhone происходит вот что: connectVoiceAnalyser()
+    // подключает <audio> к неразбуженному AudioContext через
+    // createMediaElementSource — а это, в отличие от обычного play(),
+    // ПОЛНОСТЬЮ забирает звук элемента себе. Если контекст не запущен,
+    // звука не будет вообще, хотя внешне всё выглядит рабочим: аудио
+    // «играет», статус меняется, тайминги идут — просто тишина.
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    } catch {}
+
     answerCall();
   });
   el('btn-decline').addEventListener('click', () => {
